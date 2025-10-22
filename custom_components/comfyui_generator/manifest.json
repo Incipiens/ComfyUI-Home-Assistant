@@ -1,0 +1,14 @@
+{
+  "domain": "comfyui_generator",
+  "name": "ComfyUI AI Task",
+  "codeowners": ["@AdamConwayIE"],
+  "documentation": "https://github.com/Incipiens/ComfyUI-Home-Assistant",
+  "issue_tracker": "https://github.com/Incipiens/ComfyUI-Home-Assistant/issues",
+  "version": "0.1.0",
+  "after_dependencies": ["http", "media_source", "ai_task"],
+  "requirements": ["json5==0.9.25"],
+  "iot_class": "local_polling",
+  "integration_type": "service",
+  "config_flow": true,
+  "loggers": ["custom_components.comfyui_generator"]
+}

@@ -1,0 +1,11 @@
+
+generate_image:
+  name: Generate Image
+  description: Generates an image using a ComfyUI workflow.
+  fields:
+    prompt:
+      name: Prompt
+      description: The text prompt to use for image generation.
+      required: true
+      selector:
+        text:

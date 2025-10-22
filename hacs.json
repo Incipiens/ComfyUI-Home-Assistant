@@ -1,0 +1,6 @@
+{
+  "name": "ComfyUI Generator",
+  "content_in_root": false,
+  "homeassistant": "2025.10.0b0",
+  "hide_default_branch": false
+}

@@ -1,0 +1,24 @@
+{
+  "title": "ComfyUI AI Task",
+  "config": {
+    "step": {
+      "user": {
+        "description": "Add ComfyUI as a Home Assistant AI Task for image generation. This is not an official ComfyUI integration.",
+        "data": {
+          "base_url": "ComfyUI Base URL (e.g., http://127.0.0.1:8188)",
+          "timeout": "Timeout (seconds)",
+          "workflow_path": "Workflow JSON (exported from ComfyUI), usually in /config.",
+          "image_width": "Image Width (pixels)",
+          "image_height": "Image Height (pixels)",
+          "workflow_resolution_node_id": "Node ID for resolution settings",
+          "seed_node_id": "Node ID for seed settings",
+          "workflow_prompt_node_id": "Node ID for prompt text"
+        }
+      }
+    }
+  },
+
+  "error": {
+    "invalid_file_path": "Invalid workflow path"
+  }
+}
