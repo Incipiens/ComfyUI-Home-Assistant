@@ -39,6 +39,7 @@ async def async_setup_entry(
     # Set up the ComfyUI AI Task entity
     async_add_entities([ComfyUITaskEntity(hass, config_entry)])
 
+# -------- ComfyUI AI Task Entity
 class ComfyUITaskEntity(ai_task.AITaskEntity):
     """AI Task entity that uses ComfyUI for image generation."""
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -84,7 +85,8 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
 
         # Returning nodes
         return nodes
-
+    
+    # -------- Injector, should really be renamed as it doesn't just handle prompts
     @staticmethod
     def _inject_prompt_text_at_node(nodes: Dict[str, Any], prompt_node_id: int | str, resolution_node_id: int | str, seed_node_id: int | str, 
                                     resolution_w: int | str, resolution_h: int | str, prompt_text: str) -> Dict[str, Any]:
@@ -112,6 +114,7 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
                 inputs["seed"] = random.randint(0, 2**64 - 1)
         return nodes
 
+    # -------- Generator
     async def _async_generate_image(
         self,
         task: ai_task.GenImageTask,
@@ -148,7 +151,7 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
                 return f.read()
         raise ValueError(f"Unknown workflow mode: {mode}")
     
-    # POST /prompt with node graph
+    # -------- POST /prompt with node graph
     async def _post_prompt(self, nodes: dict) -> str:
         """Wrap node graph exactly once and POST to ComfyUI."""
         url = f"{self._base_url}/prompt"
@@ -163,6 +166,7 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
                         raise RuntimeError(f"ComfyUI did not return prompt_id: {js}")
                     return prompt_id
                 
+    # -------- Poll /history/{prompt_id} and GET /view for image bytes, times out after self._timeout seconds
     async def _fetch_first_image_bytes(self, prompt_id: str) -> tuple[bytes, str]:
         """Poll /history/{prompt_id} then GET bytes from /view for the top image."""
         timeout_s = self._timeout

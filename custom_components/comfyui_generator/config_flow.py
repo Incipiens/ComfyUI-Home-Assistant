@@ -19,8 +19,10 @@ from .const import (
     CONF_WORKFLOW_TITLE
 )
 
+# support for additional workflow modes
 WORKFLOW_MODES = ["file"]
 
+# -------- User schema
 def _schema_user(defaults: dict | None = None):
     defaults = defaults or {}
     return vol.Schema({
@@ -35,6 +37,7 @@ def _schema_user(defaults: dict | None = None):
         vol.Required(CONF_WORKFLOW_PATH, default=defaults.get(CONF_WORKFLOW_PATH, "")): str,
     })
 
+# -------- Default entry for config
 class ComfyUIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     MINOR_VERSION = 1
 
@@ -69,7 +72,7 @@ class ComfyUIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self.async_step_user(user_input)
 
 
-# -------- Options Flow so you can edit later in UI --------
+# -------- Options Flow so you can edit later in UI, currently unused
 class ComfyUIOptionsFlowHandler(config_entries.OptionsFlow):
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self.config_entry = config_entry
