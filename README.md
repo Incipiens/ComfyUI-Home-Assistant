@@ -4,7 +4,7 @@ This is an unofficial custom component for Home Assistant that allows for the in
 
 This integration was originally written for an [XDA article](https://www.xda-developers.com/made-custom-home-assistant-integration-dashboard-new-art/).
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Incipiens&repository=ComfyUI-Home-Assistant)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Incipiens&repository=ComfyUI-Home-Assistant&category=integration)
 
 ## Changelog
 
