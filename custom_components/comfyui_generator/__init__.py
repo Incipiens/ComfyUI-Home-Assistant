@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import logging
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.const import Platform, __version__ as ha_version
-from .const import DOMAIN, PLATFORMS
+from homeassistant.exceptions import ConfigEntryNotReady
+from .const import DOMAIN
 
 from .ai_task import ComfyUITaskEntity
 
+_LOGGER = logging.getLogger(__name__)
 # https://github.com/loryanstrant/HA-Azure-AI-tasks/blob/main/custom_components/azure_ai_tasks/__init__.py
 PLATFORMS: list[Platform] = [Platform.AI_TASK]
 MIN_HA_VERSION = "2025.10.0"
@@ -32,7 +36,7 @@ def _check_ha_version() -> None:
         )
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    
+
     _check_ha_version()
 
     task = ComfyUITaskEntity(hass, entry)
@@ -42,13 +46,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+
     return True
 
-async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, Platform.AI_TASK)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)
     return unload_ok

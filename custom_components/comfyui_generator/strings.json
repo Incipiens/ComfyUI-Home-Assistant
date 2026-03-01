@@ -5,20 +5,54 @@
       "user": {
         "description": "Add ComfyUI as a Home Assistant AI Task for image generation. This is not an official ComfyUI integration.",
         "data": {
+          "workflow_title": "Task name",
           "base_url": "ComfyUI Base URL (e.g., http://127.0.0.1:8188)",
           "timeout": "Timeout (seconds)",
-          "workflow_path": "Workflow JSON (exported from ComfyUI), usually in /config.",
-          "image_width": "Image Width (pixels)",
-          "image_height": "Image Height (pixels)",
-          "workflow_resolution_node_id": "Node ID for resolution settings",
-          "seed_node_id": "Node ID for seed settings",
-          "workflow_prompt_node_id": "Node ID for prompt text"
+          "workflow_path": "Workflow JSON file path (must start with /config/)"
+        }
+      },
+      "nodes": {
+        "description": "Select which workflow nodes to use for each role.",
+        "data": {
+          "workflow_prompt_node_id": "Prompt text node",
+          "workflow_resolution_node_id": "Resolution node",
+          "seed_node_id": "Seed/sampler node",
+          "image_width": "Image width (px)",
+          "image_height": "Image height (px)"
+        }
+      }
+    }
+  },
+
+  "options": {
+    "step": {
+      "init": {
+        "description": "Update ComfyUI connection settings and workflow path.",
+        "data": {
+          "workflow_title": "Task name",
+          "base_url": "ComfyUI Base URL (e.g., http://127.0.0.1:8188)",
+          "timeout": "Timeout (seconds)",
+          "workflow_path": "Workflow JSON file path (must start with /config/)"
+        }
+      },
+      "nodes": {
+        "description": "Select which workflow nodes to use for each role.",
+        "data": {
+          "workflow_prompt_node_id": "Prompt text node",
+          "workflow_resolution_node_id": "Resolution node",
+          "seed_node_id": "Seed/sampler node",
+          "image_width": "Image width (px)",
+          "image_height": "Image height (px)"
         }
       }
     }
   },
 
   "error": {
-    "invalid_file_path": "Invalid workflow path"
+    "invalid_file_path": "Invalid workflow path, it must start with /config/",
+    "file_not_found": "Workflow file not found at specified path",
+    "connection_failed": "Could not connect to ComfyUI server",
+    "wrong_workflow_format": "This workflow is in UI format. Please re-export using 'Save (API Format)' in ComfyUI.",
+    "invalid_workflow": "Could not parse workflow file. Ensure it is valid JSON."
   }
 }

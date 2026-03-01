@@ -17,6 +17,11 @@ CONF_SEED_NODE_ID = "seed_node_id"  # node ID to target for seed replacement
 CONF_IMAGE_W = "image_width"
 CONF_IMAGE_H = "image_height"
 
+CONF_INPUT_IMAGE_NODE_ID = "input_image_node_id"  # node ID for Load Image node (img2img)
+CONF_DENOISE_NODE_ID = "denoise_node_id"  # node ID for denoise strength (optional)
+CONF_DEFAULT_DENOISE = "default_denoise"  # default denoise value
+DEFAULT_DENOISE = 0.75
+
 CONF_WORKFLOW_TITLE = "workflow_title"  # optional title for the workflow / AI task
 
 DEFAULT_AI_TASK_NAME = "ComfyUI Task"
@@ -24,4 +29,3 @@ DEFAULT_AI_TASK_NAME = "ComfyUI Task"
 DEFAULT_TIMEOUT = 120
 DEFAULT_PLACEHOLDER = "{{prompt}}"
 
-PLATFORMS = ["ai_task"]
