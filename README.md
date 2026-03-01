@@ -34,11 +34,15 @@ You will need the following:
 * A timeout value in seconds
 * The workflow path. This is where you uploaded your exported JSON API workflow file. Mine is in /config/comfyui. Yours should always start with /config/
 
+![ComfyUI Home Assistant config flow](/images/comfyui-config-flow.png)
+
 Node IDs are now automatically detected once the workflow JSON is processed, and desired resolution can be configured here.
 
 Once you add it, you can test it by going to Developer Tools, Actions, and select "Generate Image." The entity should now be available with the title that you used.
 
 ## Usage
+
+![ComfyUI Home Assistant developer action test](/images/comfyui-developer-aciton.png)
 
 With this integration, you can dynamically generate images based on the state of the sensors in your Home Assistant instance. For example, you could send the following data to your ComfyUI instance in order to generate an image that reflects the weather in your area:
 
