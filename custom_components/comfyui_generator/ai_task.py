@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, TYPE_CHECKING
+from typing import Any, Dict
 import aiohttp
 import mimetypes
 import json
@@ -20,18 +20,13 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 _LOGGER = logging.getLogger(__name__)
 
 from .const import (
-    DOMAIN,
     CONF_BASE_URL, CONF_TIMEOUT,
-    DEFAULT_TIMEOUT, DEFAULT_AI_TASK_NAME,
-    CONF_WORKFLOW_MODE, CONF_WORKFLOW_PATH, CONF_SEED_NODE_ID,
+    DEFAULT_TIMEOUT,
+    CONF_WORKFLOW_PATH, CONF_SEED_NODE_ID,
     CONF_WORKFLOW_RESOLUTION_NODE_ID, CONF_WORKFLOW_PROMPT_NODE_ID,
     CONF_IMAGE_W, CONF_IMAGE_H, CONF_WORKFLOW_TITLE,
 )
 from .websocket_client import ComfyUIWebSocketClient
-
-if TYPE_CHECKING:
-    from homeassistant.config_entries import ConfigSubentry
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -39,22 +34,20 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     # Set up the ComfyUI AI Task entity
-    async_add_entities([ComfyUITaskEntity(hass, config_entry)])
+    async_add_entities([ComfyUITaskEntity(config_entry)])
 
 # ComfyUI AI Task Entity
 class ComfyUITaskEntity(ai_task.AITaskEntity):
     """AI Task entity that uses ComfyUI for image generation."""
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    def __init__(self, entry: ConfigEntry) -> None:
         super().__init__()
         self._attr_has_entity_name = True
-        self.hass = hass
         self.entry = entry
         # Options override the original setup data
         data = {**entry.data, **entry.options}
         self._attr_name = data.get(CONF_WORKFLOW_TITLE, "")
         self._base_url = data.get(CONF_BASE_URL, "")
         self._timeout = data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
-        self._wf_mode = data.get(CONF_WORKFLOW_MODE, "file")
         self._wf_path = data.get(CONF_WORKFLOW_PATH, "")
         # None means leave the workflow's own values
         self._wf_resolution_node_id = data.get(CONF_WORKFLOW_RESOLUTION_NODE_ID) or None
@@ -66,16 +59,9 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
         self._attr_supported_features = ai_task.AITaskEntityFeature.GENERATE_IMAGE
 
     async def _prepare_workflow(self, prompt_text: str) -> Dict[str, Any]:
-        wf = await self._load_workflow_json()
-
-        # Normalize to dict
+        wf = json.loads(await self._load_workflow_json())
         if not isinstance(wf, dict):
-            try:
-                wf = json.loads(wf)
-            except Exception as e:
-                raise ValueError(
-                    f"_load_workflow_json() must return a dict or JSON string. Got {type(wf).__name__}"
-                ) from e
+            raise ValueError("Workflow JSON must be an object")
 
         # Check for graph/UI format instead of API format
         if "nodes" in wf and isinstance(wf.get("nodes"), list):
@@ -92,11 +78,7 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
         # Only keep valid ComfyUI nodes
         nodes = {k: v for k, v in nodes.items() if isinstance(v, dict) and "class_type" in v}
 
-        # Injecting node values
-        nodes = self._inject_prompt_text_at_node(nodes, self._wf_prompt_node_id, self._wf_resolution_node_id, self._wf_seed_node_id,
-                                                self._wf_resolution_w, self._wf_resolution_h, prompt_text)
-
-        # Returning nodes
+        self._inject_inputs(nodes, prompt_text)
         return nodes
     
     # Raise rather than silently using the workflow's saved values
@@ -117,28 +99,23 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
             )
         return inputs
 
-    # Injector, should really be renamed as it doesn't just handle prompts
-    @staticmethod
-    def _inject_prompt_text_at_node(nodes: Dict[str, Any], prompt_node_id: int | str, resolution_node_id: int | str | None, seed_node_id: int | str | None,
-                                    resolution_w: int | str, resolution_h: int | str, prompt_text: str) -> Dict[str, Any]:
-        # Set prompt
-        inputs = ComfyUITaskEntity._node_inputs(nodes, prompt_node_id, "prompt", ("text",))
+    # Set prompt, resolution and seed on the configured nodes
+    def _inject_inputs(self, nodes: Dict[str, Any], prompt_text: str) -> None:
+        inputs = self._node_inputs(nodes, self._wf_prompt_node_id, "prompt", ("text",))
         inputs["text"] = prompt_text
 
-        # Set resolution
-        if resolution_node_id:
-            inputs = ComfyUITaskEntity._node_inputs(nodes, resolution_node_id, "resolution", ("width", "height"))
-            inputs["width"] = resolution_w
-            inputs["height"] = resolution_h
+        if self._wf_resolution_node_id:
+            inputs = self._node_inputs(nodes, self._wf_resolution_node_id, "resolution", ("width", "height"))
+            inputs["width"] = self._wf_resolution_w
+            inputs["height"] = self._wf_resolution_h
 
-        # Randomise seed, RandomNoise and KSamplerAdvanced use noise_seed
-        if seed_node_id:
-            node = nodes.get(str(seed_node_id))
+        # RandomNoise and KSamplerAdvanced use noise_seed
+        if self._wf_seed_node_id:
+            node = nodes.get(str(self._wf_seed_node_id))
             node_inputs = node.get("inputs") if isinstance(node, dict) else None
             seed_key = "noise_seed" if isinstance(node_inputs, dict) and "noise_seed" in node_inputs else "seed"
-            inputs = ComfyUITaskEntity._node_inputs(nodes, seed_node_id, "seed", (seed_key,))
+            inputs = self._node_inputs(nodes, self._wf_seed_node_id, "seed", (seed_key,))
             inputs[seed_key] = random.randint(0, 2**64 - 1)
-        return nodes
 
     # Generator
     async def _async_generate_image(
@@ -187,21 +164,16 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
             height=self._wf_resolution_h if has_resolution else None,
         )
     
-    # Structured so that it can be expanded to add more loaders
     async def _load_workflow_json(self) -> str:
-        mode = self._wf_mode
-        if mode == "file":
-            p = self._wf_path.strip()
-            if not p or not p.startswith("/config/"):
-                raise ValueError("Workflow file must be an absolute path under /config")
+        p = self._wf_path.strip()
+        if not p or not p.startswith("/config/"):
+            raise ValueError("Workflow file must be an absolute path under /config")
 
-            def _read_file() -> str:
-                with open(p, "r", encoding="utf-8") as f:
-                    return f.read()
-                
-            # Converted to async
-            return await self.hass.async_add_executor_job(_read_file)
-        raise ValueError(f"Unknown workflow mode: {mode}")
+        def _read_file() -> str:
+            with open(p, "r", encoding="utf-8") as f:
+                return f.read()
+
+        return await self.hass.async_add_executor_job(_read_file)
     
     # POST /prompt with node graph
     async def _post_prompt(
@@ -225,55 +197,51 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
     # Poll /history/{prompt_id} and GET /view for image bytes, times out after self._timeout seconds
     async def _fetch_first_image_bytes(self, prompt_id: str) -> tuple[bytes, str]:
         """Poll /history/{prompt_id} then GET bytes from /view for the top image."""
-        timeout_s = self._timeout
         poll_interval = 0.5
         max_interval = 5.0
-        elapsed = 0.0
 
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_s)) as session:
-            while True:
-                hist_url = f"{self._base_url}/history/{prompt_id}"
-                async with session.get(hist_url) as r:
-                    r.raise_for_status()
-                    hist = await r.json()
+        try:
+            # Covers request time as well as sleeps
+            async with asyncio.timeout(self._timeout):
+                async with aiohttp.ClientSession() as session:
+                    while True:
+                        hist_url = f"{self._base_url}/history/{prompt_id}"
+                        async with session.get(hist_url) as r:
+                            r.raise_for_status()
+                            hist = await r.json()
 
-                entry = hist.get(prompt_id, {})
+                        entry = hist.get(prompt_id, {})
 
-                # Check for execution state
-                status = entry.get("status", {})
-                if status.get("status_str") == "error":
-                    messages = status.get("messages", [])
-                    raise HomeAssistantError(
-                        f"ComfyUI workflow execution failed for {prompt_id}: {messages}"
-                    )
+                        # Check for execution state
+                        status = entry.get("status", {})
+                        if status.get("status_str") == "error":
+                            messages = status.get("messages", [])
+                            raise HomeAssistantError(
+                                f"ComfyUI workflow execution failed for {prompt_id}: {messages}"
+                            )
 
-                outputs = entry.get("outputs", {})
+                        outputs = entry.get("outputs", {})
+                        img_ref = next(
+                            (img for node_out in outputs.values() for img in node_out.get("images", [])),
+                            None,
+                        )
 
-                img_ref = None
-                for node_out in outputs.values():
-                    for img in node_out.get("images", []):
-                        img_ref = img
-                        break
-                    if img_ref:
-                        break
+                        if img_ref:
+                            params = {
+                                "filename": img_ref.get("filename", ""),
+                                "subfolder": img_ref.get("subfolder", ""),
+                                "type": img_ref.get("type", "output"),
+                            }
+                            view_url = f"{self._base_url}/view"
+                            async with session.get(view_url, params=params) as resp:
+                                resp.raise_for_status()
+                                data = await resp.read()
 
-                if img_ref:
-                    params = {
-                        "filename": img_ref.get("filename", ""),
-                        "subfolder": img_ref.get("subfolder", ""),
-                        "type": img_ref.get("type", "output"),
-                    }
-                    view_url = f"{self._base_url}/view"
-                    async with session.get(view_url, params=params) as resp:
-                        resp.raise_for_status()
-                        data = await resp.read()
+                            mime, _ = mimetypes.guess_type(img_ref.get("filename", "image.png"))
+                            return data, (mime or "image/png")
 
-                    mime, _ = mimetypes.guess_type(img_ref.get("filename", "image.png"))
-                    return data, (mime or "image/png")
-
-                await asyncio.sleep(poll_interval)
-                elapsed += poll_interval
-                if elapsed >= timeout_s:
-                    raise HomeAssistantError(f"Timed out waiting for ComfyUI result for {prompt_id}")
-                # Exponential backoff capped at max_interval
-                poll_interval = min(poll_interval * 1.5, max_interval)
+                        await asyncio.sleep(poll_interval)
+                        # Exponential backoff capped at max_interval
+                        poll_interval = min(poll_interval * 1.5, max_interval)
+        except TimeoutError as err:
+            raise HomeAssistantError(f"Timed out waiting for ComfyUI result for {prompt_id}") from err
