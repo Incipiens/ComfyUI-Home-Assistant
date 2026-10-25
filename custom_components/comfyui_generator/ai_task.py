@@ -8,7 +8,6 @@ import aiohttp
 import mimetypes
 import json
 import asyncio
-import async_timeout
 import random
 import uuid
 
@@ -28,6 +27,7 @@ from .const import (
     CONF_WORKFLOW_RESOLUTION_NODE_ID, CONF_WORKFLOW_PROMPT_NODE_ID,
     CONF_IMAGE_W, CONF_IMAGE_H, CONF_WORKFLOW_TITLE,
 )
+from .websocket_client import ComfyUIWebSocketClient
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigSubentry
@@ -156,25 +156,27 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
         try:
             workflow_obj = await self._prepare_workflow(prompt_text)
 
-            # WebSocket-first with polling fallback
+            # Connect before posting so a fast generation can't finish unseen
+            client_id = str(uuid.uuid4())
+            ws_client: ComfyUIWebSocketClient | None = ComfyUIWebSocketClient(self._base_url, self._timeout)
             try:
-                from .websocket_client import ComfyUIWebSocketClient
-
-                client_id = str(uuid.uuid4())
-                prompt_id = await self._post_prompt(workflow_obj, client_id=client_id)
-                ws_client = ComfyUIWebSocketClient(self._base_url, self._timeout)
-                await ws_client.wait_for_completion(prompt_id, client_id)
-                image_bytes, mime_type = await self._fetch_image_from_history(
-                    prompt_id
-                )
-            except (aiohttp.WSServerHandshakeError, ConnectionError) as ws_err:
+                await ws_client.connect(client_id)
+            except (aiohttp.ClientError, TimeoutError) as ws_err:
                 _LOGGER.warning(
                     "WebSocket unavailable, falling back to polling: %s", ws_err
                 )
-                prompt_id = await self._post_prompt(workflow_obj)
-                image_bytes, mime_type = await self._fetch_first_image_bytes(
-                    prompt_id
-                )
+                ws_client = None
+
+            try:
+                prompt_id = await self._post_prompt(workflow_obj, client_id=client_id)
+                if ws_client is not None:
+                    await ws_client.wait_for_completion(prompt_id)
+            finally:
+                if ws_client is not None:
+                    await ws_client.close()
+
+            # Returns immediately if the WebSocket already saw completion
+            image_bytes, mime_type = await self._fetch_first_image_bytes(prompt_id)
 
         except Exception as err:
             raise HomeAssistantError(f"Error generating image: {err}") from err
@@ -215,7 +217,7 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
         if client_id:
             payload["client_id"] = client_id
         async with aiohttp.ClientSession() as sess:
-            with async_timeout.timeout(self._timeout):
+            async with asyncio.timeout(self._timeout):
                 async with sess.post(url, json=payload) as resp:
                     resp.raise_for_status()
                     js = await resp.json()
@@ -224,46 +226,6 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
                         raise RuntimeError(f"ComfyUI did not return prompt_id: {js}")
                     return prompt_id
                 
-    # Single GET to /history/{prompt_id} (used after WebSocket confirms completion)
-    async def _fetch_image_from_history(
-        self, prompt_id: str
-    ) -> tuple[bytes, str]:
-        """Fetch the first image from /history/{prompt_id} (already completed)."""
-        async with aiohttp.ClientSession() as session:
-            hist_url = f"{self._base_url}/history/{prompt_id}"
-            async with session.get(hist_url) as r:
-                r.raise_for_status()
-                hist = await r.json()
-
-            entry = hist.get(prompt_id, {})
-            outputs = entry.get("outputs", {})
-
-            img_ref = None
-            for node_out in outputs.values():
-                for img in node_out.get("images", []):
-                    img_ref = img
-                    break
-                if img_ref:
-                    break
-
-            if not img_ref:
-                raise HomeAssistantError(
-                    f"No images found in ComfyUI history for {prompt_id}"
-                )
-
-            params = {
-                "filename": img_ref.get("filename", ""),
-                "subfolder": img_ref.get("subfolder", ""),
-                "type": img_ref.get("type", "output"),
-            }
-            view_url = f"{self._base_url}/view"
-            async with session.get(view_url, params=params) as resp:
-                resp.raise_for_status()
-                data = await resp.read()
-
-            mime, _ = mimetypes.guess_type(img_ref.get("filename", "image.png"))
-            return data, (mime or "image/png")
-
     # Poll /history/{prompt_id} and GET /view for image bytes, times out after self._timeout seconds
     async def _fetch_first_image_bytes(self, prompt_id: str) -> tuple[bytes, str]:
         """Poll /history/{prompt_id} then GET bytes from /view for the top image."""
