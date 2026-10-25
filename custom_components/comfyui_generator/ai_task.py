@@ -56,30 +56,14 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
         self._timeout = data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
         self._wf_mode = data.get(CONF_WORKFLOW_MODE, "file")
         self._wf_path = data.get(CONF_WORKFLOW_PATH, "")
-        self._wf_resolution_node_id = data.get(CONF_WORKFLOW_RESOLUTION_NODE_ID, "")
+        # None means leave the workflow's own values
+        self._wf_resolution_node_id = data.get(CONF_WORKFLOW_RESOLUTION_NODE_ID) or None
         self._wf_resolution_w = data.get(CONF_IMAGE_W, 800)
         self._wf_resolution_h = data.get(CONF_IMAGE_H, 480)
-        self._wf_seed_node_id = data.get(CONF_SEED_NODE_ID, "")
+        self._wf_seed_node_id = data.get(CONF_SEED_NODE_ID) or None
         self._wf_prompt_node_id = data.get(CONF_WORKFLOW_PROMPT_NODE_ID, "")
 
         self._attr_supported_features = ai_task.AITaskEntityFeature.GENERATE_IMAGE
-
-        self._cached_wf_text: str | None = None
-
-    def _validate_node_ids(self, nodes: Dict[str, Any]) -> None:
-        """Log warnings for configured missing node IDs"""
-        checks = {
-            "prompt": self._wf_prompt_node_id,
-            "resolution": self._wf_resolution_node_id,
-            "seed": self._wf_seed_node_id,
-        }
-        for label, node_id in checks.items():
-            if node_id and str(node_id) not in nodes:
-                _LOGGER.warning(
-                    "Configured %s node ID '%s' not found in workflow. "
-                    "Available node IDs: %s",
-                    label, node_id, list(nodes.keys()),
-                )
 
     async def _prepare_workflow(self, prompt_text: str) -> Dict[str, Any]:
         wf = await self._load_workflow_json()
@@ -108,8 +92,6 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
         # Only keep valid ComfyUI nodes
         nodes = {k: v for k, v in nodes.items() if isinstance(v, dict) and "class_type" in v}
 
-        self._validate_node_ids(nodes)
-
         # Injecting node values
         nodes = self._inject_prompt_text_at_node(nodes, self._wf_prompt_node_id, self._wf_resolution_node_id, self._wf_seed_node_id,
                                                 self._wf_resolution_w, self._wf_resolution_h, prompt_text)
@@ -117,32 +99,45 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
         # Returning nodes
         return nodes
     
+    # Raise rather than silently using the workflow's saved values
+    @staticmethod
+    def _node_inputs(nodes: Dict[str, Any], node_id: int | str, label: str, required: tuple[str, ...]) -> Dict[str, Any]:
+        node = nodes.get(str(node_id))
+        if not isinstance(node, dict):
+            raise ValueError(
+                f"Configured {label} node '{node_id}' not found in workflow. "
+                f"Available node IDs: {list(nodes.keys())}"
+            )
+        inputs = node.get("inputs")
+        missing = [k for k in required if not isinstance(inputs, dict) or k not in inputs]
+        if missing:
+            raise ValueError(
+                f"Configured {label} node '{node_id}' ({node.get('class_type')}) has no "
+                f"{', '.join(missing)} input. Reconfigure the integration to pick a different node."
+            )
+        return inputs
+
     # Injector, should really be renamed as it doesn't just handle prompts
     @staticmethod
-    def _inject_prompt_text_at_node(nodes: Dict[str, Any], prompt_node_id: int | str, resolution_node_id: int | str, seed_node_id: int | str, 
+    def _inject_prompt_text_at_node(nodes: Dict[str, Any], prompt_node_id: int | str, resolution_node_id: int | str | None, seed_node_id: int | str | None,
                                     resolution_w: int | str, resolution_h: int | str, prompt_text: str) -> Dict[str, Any]:
         # Set prompt
-        node = nodes.get(str(prompt_node_id)) 
-        if isinstance(node, dict):
-            inputs = node.get("inputs")
-            if isinstance(inputs, dict) and "text" in inputs:
-                inputs["text"] = prompt_text
+        inputs = ComfyUITaskEntity._node_inputs(nodes, prompt_node_id, "prompt", ("text",))
+        inputs["text"] = prompt_text
 
         # Set resolution
-        node = nodes.get(str(resolution_node_id)) 
-        if isinstance(node, dict):
-            inputs = node.get("inputs")
-            if isinstance(inputs, dict) and "width" in inputs:
-                inputs["width"] = resolution_w
-            if isinstance(inputs, dict) and "height" in inputs:
-                inputs["height"] = resolution_h
+        if resolution_node_id:
+            inputs = ComfyUITaskEntity._node_inputs(nodes, resolution_node_id, "resolution", ("width", "height"))
+            inputs["width"] = resolution_w
+            inputs["height"] = resolution_h
 
-        # Randomise seed
-        node = nodes.get(str(seed_node_id))
-        if isinstance(node, dict):
-            inputs = node.get("inputs")
-            if isinstance(inputs, dict) and "seed" in inputs:
-                inputs["seed"] = random.randint(0, 2**64 - 1)
+        # Randomise seed, RandomNoise and KSamplerAdvanced use noise_seed
+        if seed_node_id:
+            node = nodes.get(str(seed_node_id))
+            node_inputs = node.get("inputs") if isinstance(node, dict) else None
+            seed_key = "noise_seed" if isinstance(node_inputs, dict) and "noise_seed" in node_inputs else "seed"
+            inputs = ComfyUITaskEntity._node_inputs(nodes, seed_node_id, "seed", (seed_key,))
+            inputs[seed_key] = random.randint(0, 2**64 - 1)
         return nodes
 
     # Generator
@@ -181,14 +176,15 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
         except Exception as err:
             raise HomeAssistantError(f"Error generating image: {err}") from err
 
+        has_resolution = self._wf_resolution_node_id is not None
         return ai_task.GenImageTaskResult(
             image_data=image_bytes,
             mime_type=mime_type,
             model="ComfyUI",
             conversation_id=None,
             revised_prompt=prompt_text,
-            width=self._wf_resolution_w,
-            height=self._wf_resolution_h,
+            width=self._wf_resolution_w if has_resolution else None,
+            height=self._wf_resolution_h if has_resolution else None,
         )
     
     # Structured so that it can be expanded to add more loaders
