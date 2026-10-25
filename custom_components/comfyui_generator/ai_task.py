@@ -49,7 +49,8 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
         self._attr_has_entity_name = True
         self.hass = hass
         self.entry = entry
-        data = entry.data
+        # Options override the original setup data
+        data = {**entry.data, **entry.options}
         self._attr_name = data.get(CONF_WORKFLOW_TITLE, "")
         self._base_url = data.get(CONF_BASE_URL, "")
         self._timeout = data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
