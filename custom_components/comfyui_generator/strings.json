@@ -3,16 +3,16 @@
   "config": {
     "step": {
       "user": {
-        "description": "Add ComfyUI as a Home Assistant AI Task for image generation. This is not an official ComfyUI integration.",
+        "description": "Add a ComfyUI server and its first workflow as a Home Assistant AI Task for image generation. More workflows can be added to the server later. This is not an official ComfyUI integration.",
         "data": {
-          "workflow_title": "Task name",
           "base_url": "ComfyUI Base URL (e.g., http://127.0.0.1:8188)",
           "timeout": "Timeout (seconds)",
+          "workflow_title": "Task name",
           "workflow_path": "Workflow JSON file path (must start with /config/)"
         }
       },
       "nodes": {
-        "description": "Select which workflow nodes to use for each role. Leave Resolution and Seed Nodes empty to keep the workflow's original values.",
+        "description": "Select which workflow nodes to use for each role. Resolution and seed nodes are optional, leave them empty to keep the workflow's own values.",
         "data": {
           "workflow_prompt_node_id": "Prompt text node",
           "workflow_resolution_node_id": "Resolution node",
@@ -20,46 +20,83 @@
           "image_width": "Image width (px)",
           "image_height": "Image height (px)"
         }
+      },
+      "reconfigure": {
+        "description": "Update the ComfyUI server URL. Workflows are changed from their own entries.",
+        "data": {
+          "base_url": "ComfyUI Base URL (e.g., http://127.0.0.1:8188)"
+        }
       }
     },
     "error": {
+      "connection_failed": "Could not connect to ComfyUI server",
       "invalid_file_path": "Invalid workflow path, it must start with /config/",
       "file_not_found": "Workflow file not found at specified path",
-      "connection_failed": "Could not connect to ComfyUI server",
       "wrong_workflow_format": "This workflow is in UI format. Please re-export using 'Save (API Format)' in ComfyUI.",
-      "invalid_workflow": "Could not parse workflow file. Ensure it's valid JSON.",
-      "no_prompt_node": "No node with a text input was found in this workflow."
+      "invalid_workflow": "Could not parse workflow file. Ensure it is valid JSON.",
+      "no_prompt_node": "No node with a text input was found in this workflow, so there's nowhere to put the prompt."
+    },
+    "abort": {
+      "already_configured": "This ComfyUI server is already configured"
     }
   },
   "options": {
     "step": {
       "init": {
-        "description": "Update ComfyUI connection settings and workflow path.",
+        "description": "How long to wait for ComfyUI to finish generating an image.",
         "data": {
-          "workflow_title": "Task name",
-          "base_url": "ComfyUI Base URL (e.g., http://127.0.0.1:8188)",
-          "timeout": "Timeout (seconds)",
-          "workflow_path": "Workflow JSON file path (must start with /config/)"
-        }
-      },
-      "nodes": {
-        "description": "Select which workflow nodes to use for each role. Leave Resolution and Seed Nodes empty to keep the workflow's original values.",
-        "data": {
-          "workflow_prompt_node_id": "Prompt text node",
-          "workflow_resolution_node_id": "Resolution node",
-          "seed_node_id": "Seed/sampler node",
-          "image_width": "Image width (px)",
-          "image_height": "Image height (px)"
+          "timeout": "Timeout (seconds)"
         }
       }
+    }
+  },
+  "config_subentries": {
+    "ai_task_data": {
+      "entry_type": "Workflow",
+      "initiate_flow": {
+        "user": "Add workflow",
+        "reconfigure": "Reconfigure workflow"
+      },
+      "step": {
+        "user": {
+          "description": "Choose an exported ComfyUI workflow to use as an AI Task.",
+          "data": {
+            "workflow_title": "Task name",
+            "workflow_path": "Workflow JSON file path (must start with /config/)"
+          }
+        },
+        "nodes": {
+          "description": "Select which workflow nodes to use for each role. Resolution and seed nodes are optional, leave them empty to keep the workflow's own values.",
+          "data": {
+            "workflow_prompt_node_id": "Prompt text node",
+            "workflow_resolution_node_id": "Resolution node",
+            "seed_node_id": "Seed/sampler node",
+            "image_width": "Image width (px)",
+            "image_height": "Image height (px)"
+          }
+        }
+      },
+      "error": {
+        "invalid_file_path": "Invalid workflow path, it must start with /config/",
+        "file_not_found": "Workflow file not found at specified path",
+        "wrong_workflow_format": "This workflow is in UI format. Please re-export using 'Save (API Format)' in ComfyUI.",
+        "invalid_workflow": "Could not parse workflow file. Ensure it is valid JSON.",
+        "no_prompt_node": "No node with a text input was found in this workflow, so there's nowhere to put the prompt."
+      }
+    }
+  },
+  "exceptions": {
+    "cannot_connect": {
+      "message": "Could not connect to ComfyUI at {base_url}: {error}"
     },
-    "error": {
-      "invalid_file_path": "Invalid workflow path, it must start with /config/",
-      "file_not_found": "Workflow file not found at specified path",
-      "connection_failed": "Could not connect to ComfyUI server",
-      "wrong_workflow_format": "This workflow is in UI format. Please re-export using 'Save (API Format)' in ComfyUI.",
-      "invalid_workflow": "Could not parse workflow file. Ensure it's valid JSON.",
-      "no_prompt_node": "No node with a text input was found in this workflow."
+    "generation_failed": {
+      "message": "Error generating image: {error}"
+    },
+    "execution_failed": {
+      "message": "ComfyUI workflow failed: {error}"
+    },
+    "timed_out": {
+      "message": "Timed out after {timeout} seconds waiting for ComfyUI"
     }
   }
 }

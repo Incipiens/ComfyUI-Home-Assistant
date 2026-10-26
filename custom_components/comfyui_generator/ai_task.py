@@ -12,19 +12,22 @@ import random
 import uuid
 
 from homeassistant.components import ai_task
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 _LOGGER = logging.getLogger(__name__)
 
 from .const import (
+    DOMAIN, SUBENTRY_AI_TASK,
     CONF_BASE_URL, CONF_TIMEOUT,
     DEFAULT_TIMEOUT,
     CONF_WORKFLOW_PATH, CONF_SEED_NODE_ID,
     CONF_WORKFLOW_RESOLUTION_NODE_ID, CONF_WORKFLOW_PROMPT_NODE_ID,
-    CONF_IMAGE_W, CONF_IMAGE_H, CONF_WORKFLOW_TITLE,
+    CONF_IMAGE_W, CONF_IMAGE_H,
 )
 from .websocket_client import ComfyUIWebSocketClient
 
@@ -33,21 +36,36 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    # Set up the ComfyUI AI Task entity
-    async_add_entities([ComfyUITaskEntity(config_entry)])
+    # One entity per workflow subentry
+    for subentry in config_entry.subentries.values():
+        if subentry.subentry_type != SUBENTRY_AI_TASK:
+            continue
+        async_add_entities(
+            [ComfyUITaskEntity(config_entry, subentry)],
+            config_subentry_id=subentry.subentry_id,
+        )
 
 # ComfyUI AI Task Entity
 class ComfyUITaskEntity(ai_task.AITaskEntity):
     """AI Task entity that uses ComfyUI for image generation."""
-    def __init__(self, entry: ConfigEntry) -> None:
+
+    # Named after the device, which is named after the subentry
+    _attr_has_entity_name = True
+    _attr_name = None
+
+    def __init__(self, entry: ConfigEntry, subentry: ConfigSubentry) -> None:
         super().__init__()
-        self._attr_has_entity_name = True
         self.entry = entry
-        # Options override the original setup data
-        data = {**entry.data, **entry.options}
-        self._attr_name = data.get(CONF_WORKFLOW_TITLE, "")
-        self._base_url = data.get(CONF_BASE_URL, "")
-        self._timeout = data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
+        self._attr_unique_id = subentry.subentry_id
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, subentry.subentry_id)},
+            name=subentry.title,
+            manufacturer="ComfyUI",
+            entry_type=DeviceEntryType.SERVICE,
+        )
+        self._base_url = entry.data[CONF_BASE_URL]
+        self._timeout = entry.options.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
+        data = subentry.data
         self._wf_path = data.get(CONF_WORKFLOW_PATH, "")
         # None means leave the workflow's own values
         self._wf_resolution_node_id = data.get(CONF_WORKFLOW_RESOLUTION_NODE_ID) or None
@@ -130,7 +148,9 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
 
             # Connect before posting so a fast generation can't finish unseen
             client_id = str(uuid.uuid4())
-            ws_client: ComfyUIWebSocketClient | None = ComfyUIWebSocketClient(self._base_url, self._timeout)
+            ws_client: ComfyUIWebSocketClient | None = ComfyUIWebSocketClient(
+                async_get_clientsession(self.hass), self._base_url, self._timeout
+            )
             try:
                 await ws_client.connect(client_id)
             except (aiohttp.ClientError, TimeoutError) as ws_err:
@@ -150,8 +170,14 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
             # Returns immediately if the WebSocket already saw completion
             image_bytes, mime_type = await self._fetch_first_image_bytes(prompt_id)
 
+        except HomeAssistantError:
+            raise
         except Exception as err:
-            raise HomeAssistantError(f"Error generating image: {err}") from err
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="generation_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
 
         has_resolution = self._wf_resolution_node_id is not None
         return ai_task.GenImageTaskResult(
@@ -184,15 +210,14 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
         payload: dict = {"prompt": nodes}
         if client_id:
             payload["client_id"] = client_id
-        async with aiohttp.ClientSession() as sess:
-            async with asyncio.timeout(self._timeout):
-                async with sess.post(url, json=payload) as resp:
-                    resp.raise_for_status()
-                    js = await resp.json()
-                    prompt_id = js.get("prompt_id") or js.get("promptId")
-                    if not prompt_id:
-                        raise RuntimeError(f"ComfyUI did not return prompt_id: {js}")
-                    return prompt_id
+        async with asyncio.timeout(self._timeout):
+            async with async_get_clientsession(self.hass).post(url, json=payload) as resp:
+                resp.raise_for_status()
+                js = await resp.json()
+                prompt_id = js.get("prompt_id") or js.get("promptId")
+                if not prompt_id:
+                    raise RuntimeError(f"ComfyUI did not return prompt_id: {js}")
+                return prompt_id
                 
     # Poll /history/{prompt_id} and GET /view for image bytes, times out after self._timeout seconds
     async def _fetch_first_image_bytes(self, prompt_id: str) -> tuple[bytes, str]:
@@ -203,45 +228,51 @@ class ComfyUITaskEntity(ai_task.AITaskEntity):
         try:
             # Covers request time as well as sleeps
             async with asyncio.timeout(self._timeout):
-                async with aiohttp.ClientSession() as session:
-                    while True:
-                        hist_url = f"{self._base_url}/history/{prompt_id}"
-                        async with session.get(hist_url) as r:
-                            r.raise_for_status()
-                            hist = await r.json()
+                session = async_get_clientsession(self.hass)
+                while True:
+                    hist_url = f"{self._base_url}/history/{prompt_id}"
+                    async with session.get(hist_url) as r:
+                        r.raise_for_status()
+                        hist = await r.json()
 
-                        entry = hist.get(prompt_id, {})
+                    entry = hist.get(prompt_id, {})
 
-                        # Check for execution state
-                        status = entry.get("status", {})
-                        if status.get("status_str") == "error":
-                            messages = status.get("messages", [])
-                            raise HomeAssistantError(
-                                f"ComfyUI workflow execution failed for {prompt_id}: {messages}"
-                            )
-
-                        outputs = entry.get("outputs", {})
-                        img_ref = next(
-                            (img for node_out in outputs.values() for img in node_out.get("images", [])),
-                            None,
+                    # Check for execution state
+                    status = entry.get("status", {})
+                    if status.get("status_str") == "error":
+                        messages = status.get("messages", [])
+                        raise HomeAssistantError(
+                            translation_domain=DOMAIN,
+                            translation_key="execution_failed",
+                            translation_placeholders={"error": str(messages)},
                         )
 
-                        if img_ref:
-                            params = {
-                                "filename": img_ref.get("filename", ""),
-                                "subfolder": img_ref.get("subfolder", ""),
-                                "type": img_ref.get("type", "output"),
-                            }
-                            view_url = f"{self._base_url}/view"
-                            async with session.get(view_url, params=params) as resp:
-                                resp.raise_for_status()
-                                data = await resp.read()
+                    outputs = entry.get("outputs", {})
+                    img_ref = next(
+                        (img for node_out in outputs.values() for img in node_out.get("images", [])),
+                        None,
+                    )
 
-                            mime, _ = mimetypes.guess_type(img_ref.get("filename", "image.png"))
-                            return data, (mime or "image/png")
+                    if img_ref:
+                        params = {
+                            "filename": img_ref.get("filename", ""),
+                            "subfolder": img_ref.get("subfolder", ""),
+                            "type": img_ref.get("type", "output"),
+                        }
+                        view_url = f"{self._base_url}/view"
+                        async with session.get(view_url, params=params) as resp:
+                            resp.raise_for_status()
+                            data = await resp.read()
 
-                        await asyncio.sleep(poll_interval)
-                        # Exponential backoff capped at max_interval
-                        poll_interval = min(poll_interval * 1.5, max_interval)
+                        mime, _ = mimetypes.guess_type(img_ref.get("filename", "image.png"))
+                        return data, (mime or "image/png")
+
+                    await asyncio.sleep(poll_interval)
+                    # Exponential backoff capped at max_interval
+                    poll_interval = min(poll_interval * 1.5, max_interval)
         except TimeoutError as err:
-            raise HomeAssistantError(f"Timed out waiting for ComfyUI result for {prompt_id}") from err
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="timed_out",
+                translation_placeholders={"timeout": str(self._timeout)},
+            ) from err

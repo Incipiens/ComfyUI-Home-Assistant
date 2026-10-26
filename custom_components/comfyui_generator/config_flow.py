@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -8,9 +9,16 @@ from typing import Any
 import aiohttp
 import voluptuous as vol
 
-from homeassistant import config_entries
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    ConfigSubentryFlow,
+    OptionsFlow,
+    SubentryFlowResult,
+)
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     SelectOptionDict,
     SelectSelector,
@@ -33,10 +41,8 @@ from .const import (
     DEFAULT_AI_TASK_NAME,
     DEFAULT_TIMEOUT,
     DOMAIN,
+    SUBENTRY_AI_TASK,
 )
-
-# Cleared explicitly so options can override entry.data
-OPTIONAL_NODE_KEYS = (CONF_WORKFLOW_RESOLUTION_NODE_ID, CONF_SEED_NODE_ID)
 
 
 def _parse_workflow_nodes(workflow_text: str) -> dict[str, Any]:
@@ -88,33 +94,25 @@ def _build_node_options(
 
 
 # Check system_stats endpoint
-async def _test_comfyui_connection(base_url: str) -> bool:
+async def _test_comfyui_connection(hass: HomeAssistant, base_url: str) -> bool:
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{base_url.rstrip('/')}/system_stats",
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
+        async with asyncio.timeout(10):
+            async with async_get_clientsession(hass).get(f"{base_url}/system_stats") as resp:
                 resp.raise_for_status()
                 return True
-    except Exception:
+    except (aiohttp.ClientError, TimeoutError):
         return False
 
 
-async def _async_validate_connection(
-    hass: HomeAssistant, user_input: dict[str, Any]
+async def _async_validate_workflow(
+    hass: HomeAssistant, path: str
 ) -> tuple[dict[str, str], dict[str, Any]]:
-    """Shared by config and options flows, returns errors and parsed nodes"""
-    p = user_input.get(CONF_WORKFLOW_PATH, "").strip()
-    if not p or not p.startswith("/config/"):
+    """Shared by the config and subentry flows, returns errors and parsed nodes"""
+    if not path or not path.startswith("/config/"):
         return {"base": "invalid_file_path"}, {}
 
-    base_url = user_input.get(CONF_BASE_URL, "").rstrip("/")
-    if not await _test_comfyui_connection(base_url):
-        return {"base": "connection_failed"}, {}
-
     try:
-        nodes = await hass.async_add_executor_job(_read_workflow_nodes, p)
+        nodes = await hass.async_add_executor_job(_read_workflow_nodes, path)
     except ValueError as exc:
         # JSONDecodeError is a ValueError but not a translation key
         if isinstance(exc, json.JSONDecodeError):
@@ -131,24 +129,30 @@ async def _async_validate_connection(
     return {}, nodes
 
 
-# Connection + workflow
-def _schema_connection(defaults: dict[str, Any] | None = None) -> vol.Schema:
+def _workflow_fields(d: dict[str, Any]) -> dict[vol.Marker, Any]:
+    return {
+        vol.Required(
+            CONF_WORKFLOW_TITLE,
+            default=d.get(CONF_WORKFLOW_TITLE, DEFAULT_AI_TASK_NAME),
+        ): str,
+        vol.Required(
+            CONF_WORKFLOW_PATH, default=d.get(CONF_WORKFLOW_PATH, "")
+        ): str,
+    }
+
+
+# Server + first workflow, shown on initial setup
+def _schema_user(defaults: dict[str, Any] | None = None) -> vol.Schema:
     d = defaults or {}
     return vol.Schema(
         {
-            vol.Optional(
-                CONF_WORKFLOW_TITLE,
-                default=d.get(CONF_WORKFLOW_TITLE, DEFAULT_AI_TASK_NAME),
-            ): str,
             vol.Required(
                 CONF_BASE_URL, default=d.get(CONF_BASE_URL, "")
             ): str,
             vol.Optional(
                 CONF_TIMEOUT, default=d.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
             ): int,
-            vol.Required(
-                CONF_WORKFLOW_PATH, default=d.get(CONF_WORKFLOW_PATH, "")
-            ): str,
+            **_workflow_fields(d),
         }
     )
 
@@ -203,112 +207,190 @@ def _schema_nodes(
     return vol.Schema(schema_dict)
 
 
-def _merge_node_input(step1_data: dict[str, Any], user_input: dict[str, Any]) -> dict[str, Any]:
-    """Store cleared optional nodes as None"""
-    return {
-        **step1_data,
-        **{key: None for key in OPTIONAL_NODE_KEYS},
-        **user_input,
-    }
-
-
-class ComfyUIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+class ComfyUIConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle config flow"""
 
+    VERSION = 2
     MINOR_VERSION = 1
 
     def __init__(self) -> None:
-        self._step1_data: dict[str, Any] = {}
+        self._base_url = ""
+        self._timeout = DEFAULT_TIMEOUT
+        self._task_title = ""
+        self._workflow_path = ""
         self._workflow_nodes: dict[str, Any] = {}
 
     @staticmethod
     @callback
     def async_get_options_flow(
-        config_entry: config_entries.ConfigEntry,
+        config_entry: ConfigEntry,
     ) -> ComfyUIOptionsFlowHandler:
         return ComfyUIOptionsFlowHandler()
 
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(
+        cls, config_entry: ConfigEntry
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        return {SUBENTRY_AI_TASK: ComfyUIWorkflowSubentryFlow}
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         if user_input is None:
             return self.async_show_form(
                 step_id="user",
-                data_schema=_schema_connection(),
+                data_schema=_schema_user(),
             )
 
-        errors, self._workflow_nodes = await _async_validate_connection(self.hass, user_input)
+        base_url = user_input[CONF_BASE_URL].strip().rstrip("/")
+        self._async_abort_entries_match({CONF_BASE_URL: base_url})
+
+        errors: dict[str, str] = {}
+        if not await _test_comfyui_connection(self.hass, base_url):
+            errors["base"] = "connection_failed"
+        else:
+            path = user_input[CONF_WORKFLOW_PATH].strip()
+            errors, self._workflow_nodes = await _async_validate_workflow(self.hass, path)
 
         if errors:
             return self.async_show_form(
                 step_id="user",
-                data_schema=_schema_connection(user_input),
+                data_schema=_schema_user(user_input),
                 errors=errors,
             )
 
-        self._step1_data = user_input
+        self._base_url = base_url
+        self._timeout = user_input.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
+        self._task_title = user_input[CONF_WORKFLOW_TITLE].strip()
+        self._workflow_path = path
         return await self.async_step_nodes()
 
     async def async_step_nodes(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         if user_input is None:
             return self.async_show_form(
                 step_id="nodes",
                 data_schema=_schema_nodes(self._workflow_nodes),
             )
 
-        merged = _merge_node_input(self._step1_data, user_input)
         return self.async_create_entry(
-            title=merged.get(CONF_WORKFLOW_TITLE, DEFAULT_AI_TASK_NAME).strip(),
-            data=merged,
+            title=self._base_url,
+            data={CONF_BASE_URL: self._base_url},
+            options={CONF_TIMEOUT: self._timeout},
+            subentries=[
+                {
+                    "subentry_type": SUBENTRY_AI_TASK,
+                    "title": self._task_title,
+                    "data": {CONF_WORKFLOW_PATH: self._workflow_path, **user_input},
+                    "unique_id": None,
+                }
+            ],
         )
 
-    async def async_step_import(
+    # Change the server URL, workflows are reconfigured on their subentries
+    async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        return await self.async_step_user(user_input)
+    ) -> ConfigFlowResult:
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            base_url = user_input[CONF_BASE_URL].strip().rstrip("/")
+            if base_url != entry.data[CONF_BASE_URL]:
+                self._async_abort_entries_match({CONF_BASE_URL: base_url})
+
+            if not await _test_comfyui_connection(self.hass, base_url):
+                errors["base"] = "connection_failed"
+            else:
+                # Keep a custom title, but follow the URL if it was never renamed
+                title = base_url if entry.title == entry.data[CONF_BASE_URL] else entry.title
+                return self.async_update_and_abort(
+                    entry, title=title, data_updates={CONF_BASE_URL: base_url}
+                )
+
+        current = user_input or entry.data
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema(
+                {vol.Required(CONF_BASE_URL, default=current.get(CONF_BASE_URL, "")): str}
+            ),
+            errors=errors,
+        )
 
 
-class ComfyUIOptionsFlowHandler(config_entries.OptionsFlow):
-
-    _step1_data: dict[str, Any]
-    _workflow_nodes: dict[str, Any]
+class ComfyUIOptionsFlowHandler(OptionsFlow):
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        current = {**self.config_entry.data, **(self.config_entry.options or {})}
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
 
-        if user_input is None:
-            return self.async_show_form(
-                step_id="init",
-                data_schema=_schema_connection(current),
-            )
+        timeout = self.config_entry.options.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema({vol.Required(CONF_TIMEOUT, default=timeout): int}),
+        )
 
-        errors, self._workflow_nodes = await _async_validate_connection(self.hass, user_input)
 
-        if errors:
-            return self.async_show_form(
-                step_id="init",
-                data_schema=_schema_connection(user_input),
-                errors=errors,
-            )
+class ComfyUIWorkflowSubentryFlow(ConfigSubentryFlow):
+    """Add or reconfigure a workflow on an existing server"""
 
-        self._step1_data = user_input
-        return await self.async_step_nodes()
+    def __init__(self) -> None:
+        super().__init__()
+        self._title = ""
+        self._workflow_path = ""
+        self._workflow_nodes: dict[str, Any] = {}
 
-    # Dropdown node selector
+    @property
+    def _is_new(self) -> bool:
+        return self.source == "user"
+
+    def _current(self) -> dict[str, Any]:
+        if self._is_new:
+            return {}
+        subentry = self._get_reconfigure_subentry()
+        return {CONF_WORKFLOW_TITLE: subentry.title, **subentry.data}
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            path = user_input[CONF_WORKFLOW_PATH].strip()
+            errors, self._workflow_nodes = await _async_validate_workflow(self.hass, path)
+            if not errors:
+                self._title = user_input[CONF_WORKFLOW_TITLE].strip()
+                self._workflow_path = path
+                return await self.async_step_nodes()
+
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema(_workflow_fields(user_input or self._current())),
+            errors=errors,
+        )
+
+    async_step_reconfigure = async_step_user
+
     async def async_step_nodes(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        current = {**self.config_entry.data, **(self.config_entry.options or {})}
-
+    ) -> SubentryFlowResult:
         if user_input is None:
             return self.async_show_form(
                 step_id="nodes",
-                data_schema=_schema_nodes(self._workflow_nodes, current),
+                data_schema=_schema_nodes(self._workflow_nodes, self._current()),
             )
 
-        merged = _merge_node_input(self._step1_data, user_input)
-        return self.async_create_entry(data=merged)
+        data = {CONF_WORKFLOW_PATH: self._workflow_path, **user_input}
+        if self._is_new:
+            return self.async_create_entry(title=self._title, data=data)
+
+        return self.async_update_and_abort(
+            self._get_entry(),
+            self._get_reconfigure_subentry(),
+            title=self._title,
+            data=data,
+        )

@@ -22,3 +22,15 @@ DEFAULT_AI_TASK_NAME = "ComfyUI Task"
 
 DEFAULT_TIMEOUT = 120
 
+SUBENTRY_AI_TASK = "ai_task_data"  # one subentry per workflow
+
+# Keys stored on each workflow subentry; parent entry holds the server
+SUBENTRY_KEYS = (
+    CONF_WORKFLOW_PATH,
+    CONF_WORKFLOW_PROMPT_NODE_ID,
+    CONF_WORKFLOW_RESOLUTION_NODE_ID,
+    CONF_SEED_NODE_ID,
+    CONF_IMAGE_W,
+    CONF_IMAGE_H,
+)
+

@@ -10,6 +10,8 @@ import aiohttp
 
 from homeassistant.exceptions import HomeAssistantError
 
+from .const import DOMAIN
+
 _LOGGER = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT = 10
@@ -17,10 +19,10 @@ CONNECT_TIMEOUT = 10
 
 class ComfyUIWebSocketClient:
 
-    def __init__(self, base_url: str, timeout: int) -> None:
+    def __init__(self, session: aiohttp.ClientSession, base_url: str, timeout: int) -> None:
+        self._session = session
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
-        self._session: aiohttp.ClientSession | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
 
     def _ws_url(self, client_id: str) -> str:
@@ -36,21 +38,14 @@ class ComfyUIWebSocketClient:
     async def connect(self, client_id: str) -> None:
         ws_url = self._ws_url(client_id)
         _LOGGER.debug("Connecting to ComfyUI WebSocket: %s", ws_url)
-        self._session = aiohttp.ClientSession()
-        try:
-            async with asyncio.timeout(CONNECT_TIMEOUT):
-                self._ws = await self._session.ws_connect(ws_url)
-        except BaseException:
-            await self.close()
-            raise
+        async with asyncio.timeout(CONNECT_TIMEOUT):
+            self._ws = await self._session.ws_connect(ws_url)
 
+    # Only closes the socket, the session is shared with the rest of Home Assistant
     async def close(self) -> None:
         if self._ws is not None:
             await self._ws.close()
             self._ws = None
-        if self._session is not None:
-            await self._session.close()
-            self._session = None
 
     # Returns False if socket dropped, so caller can poll
     async def wait_for_completion(self, prompt_id: str) -> bool:
@@ -91,9 +86,12 @@ class ComfyUIWebSocketClient:
                 elif msg_type == "execution_error":
                     err_data = data.get("data", {})
                     raise HomeAssistantError(
-                        f"ComfyUI execution error: "
-                        f"{err_data.get('exception_type', 'Unknown')}: "
-                        f"{err_data.get('exception_message', str(err_data))}"
+                        translation_domain=DOMAIN,
+                        translation_key="execution_failed",
+                        translation_placeholders={
+                            "error": f"{err_data.get('exception_type', 'Unknown')}: "
+                            f"{err_data.get('exception_message', str(err_data))}"
+                        },
                     )
 
                 elif msg_type == "executing":
